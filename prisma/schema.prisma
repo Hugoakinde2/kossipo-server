@@ -1,0 +1,695 @@
+// ============================================================================
+// KOSSIPO — Schéma Prisma (PostgreSQL)
+// ============================================================================
+// Traduction complète du schéma SQLite précédent (migrations/001_init.sql) —
+// AUCUNE table supprimée. Deux écarts assumés, documentés ici :
+//
+// 1. Les contraintes CHECK "exactement un de product_id/ingredient_id non
+//    nul" (tables `stock`, `stock_movements`, `inventory_items`) ne sont pas
+//    exprimées ici en syntaxe Prisma déclarative (support inégal selon les
+//    versions de Prisma) — elles sont appliquées au niveau applicatif dans
+//    les services (voir src/services/stock.service.ts), documentées à
+//    chaque endroit concerné.
+// 2. `inventory_items.variance` était une colonne calculée (GENERATED ALWAYS
+//    AS) sous SQLite — recalculée à la lecture côté application plutôt que
+//    stockée, pour rester simple et portable.
+//
+// Conventions conservées : montants en FCFA (Int, pas de décimales), noms de
+// colonnes en snake_case côté base (via @map) pour rester lisible en SQL brut
+// si besoin, camelCase côté code TypeScript (convention Prisma standard).
+// ============================================================================
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ----------------------------------------------------------------------------
+// 1. RÔLES
+// ----------------------------------------------------------------------------
+enum RoleCode {
+  super_admin
+  admin
+  gerant
+  caissier
+  serveur
+  cuisine
+  bar
+}
+
+model Role {
+  id          Int      @id @default(autoincrement())
+  uuid        String?  @unique // identifiant de synchronisation stable (= code du rôle en pratique) — voir kossipo-electron/src/main/sync.js pour le protocole existant, conservé pour compatibilité
+  code        RoleCode @unique
+  label       String
+  permissions Json     @default("{}")
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+  deleted     Boolean  @default(false)
+
+  users User[]
+
+  @@map("roles")
+}
+
+// ----------------------------------------------------------------------------
+// 2. UTILISATEURS
+// ----------------------------------------------------------------------------
+model User {
+  id                 Int       @id @default(autoincrement())
+  uuid               String?   @unique // identifiant de synchronisation stable — voir note sur Role.uuid
+  name               String
+  username           String?   @unique
+  roleId             Int       @map("role_id")
+  role               Role      @relation(fields: [roleId], references: [id])
+  passwordHash       String    @map("password_hash")
+  mustChangePassword Boolean   @default(true) @map("must_change_password")
+  active             Boolean   @default(true)
+  deleted            Boolean   @default(false) // suppression logique — voir kossipo-electron/src/main/auth.js pour la même règle côté poste de caisse
+  failedAttempts     Int       @default(0) @map("failed_attempts")
+  lockedUntil        DateTime? @map("locked_until")
+  createdAt          DateTime  @default(now()) @map("created_at")
+  updatedAt          DateTime  @updatedAt @map("updated_at")
+
+  openedSeats      TableSeat[]      @relation("SeatOpenedBy")
+  openedOrders     Order[]          @relation("OrderOpenedBy")
+  cashierSales     Sale[]           @relation("SaleCashier")
+  serverSales      Sale[]           @relation("SaleServer")
+  cashMovements    CashMovement[]
+  expenses         Expense[]
+  stockMovements   StockMovement[]
+  startedInventories Inventory[]
+  changeHistory    ChangeHistory[]
+  auditLogs        AuditLog[]
+
+  @@index([roleId])
+  @@index([active])
+  @@map("users")
+}
+
+// ----------------------------------------------------------------------------
+// 3. CATÉGORIES
+// ----------------------------------------------------------------------------
+model Category {
+  id        Int      @id @default(autoincrement())
+  code      String   @unique
+  label     String
+  sortOrder Int      @default(0) @map("sort_order")
+  active    Boolean  @default(true)
+
+  products Product[]
+
+  @@map("categories")
+}
+
+// ----------------------------------------------------------------------------
+// 4. PRODUITS
+// ----------------------------------------------------------------------------
+enum PriceMode {
+  fixed
+  manual
+}
+
+model Product {
+  id            Int       @id @default(autoincrement())
+  sourceId      String?   @unique @map("source_id") // identifiant stable côté Electron (ex. "riz-poulet") — permet un rapprochement fiable et idempotent, base de la restauration automatique (voir prisma/seed.ts)
+  categoryId    Int       @map("category_id")
+  category      Category  @relation(fields: [categoryId], references: [id])
+  name          String
+  barcode       String?   @unique
+  priceMode     PriceMode @default(fixed) @map("price_mode")
+  basePrice     Int?      @map("base_price") // NULL autorisé seulement si priceMode = manual — appliqué en service (voir note d'écarts en tête de fichier)
+  vipFixedPrice Int?      @map("vip_fixed_price")
+  costPrice     Int?      @map("cost_price")
+  taxRate       Float?    @map("tax_rate") // pourcentage informatif (voir kossipo-electron) — n'affecte jamais le prix affiché, sert uniquement à la ventilation TVA des rapports
+  photo         String?   // image encodée en base64 (même format que côté Electron) — à revoir vers un stockage objet (S3, etc.) si le volume/la taille des images devient significatif
+  supplierId    Int?      @map("supplier_id") // fournisseur préféré — voir purchaseRecords pour l'historique complet (un produit peut avoir été acheté à plusieurs fournisseurs dans le temps)
+  supplier      Supplier? @relation(fields: [supplierId], references: [id])
+  trackStock    Boolean   @default(false) @map("track_stock")
+  active        Boolean   @default(true)
+  createdAt     DateTime  @default(now()) @map("created_at")
+  updatedAt     DateTime  @updatedAt @map("updated_at")
+
+  variants      ProductVariant[]
+  recipeItems   ProductRecipeItem[]
+  orderItems    OrderItem[]
+  saleItems     SaleItem[]
+  stock         Stock?
+  stockMovements StockMovement[]
+  inventoryItems InventoryItem[]
+  purchaseRecords PurchaseRecord[]
+
+  @@index([categoryId])
+  @@index([supplierId])
+  @@map("products")
+}
+
+// ----------------------------------------------------------------------------
+// 5. VARIANTES
+// ----------------------------------------------------------------------------
+model ProductVariant {
+  id         Int     @id @default(autoincrement())
+  productId  Int     @map("product_id")
+  product    Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+  name       String
+  priceDelta Int     @default(0) @map("price_delta")
+  barcode    String? @unique
+  active     Boolean @default(true)
+
+  orderItems OrderItem[]
+  saleItems  SaleItem[] @relation("SaleItemVariant")
+
+  @@unique([productId, name])
+  @@index([productId])
+  @@map("product_variants")
+}
+
+// ----------------------------------------------------------------------------
+// Ingrédients + recette (BOM) — conservés pour la déduction automatique de stock
+// ----------------------------------------------------------------------------
+model Ingredient {
+  id        Int      @id @default(autoincrement())
+  name      String   @unique
+  unit      String   @default("kg")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  recipeItems    ProductRecipeItem[]
+  stock          Stock?
+  stockMovements StockMovement[]
+  inventoryItems InventoryItem[]
+  purchaseRecords PurchaseRecord[]
+
+  @@map("ingredients")
+}
+
+model ProductRecipeItem {
+  id           Int        @id @default(autoincrement())
+  productId    Int        @map("product_id")
+  product      Product    @relation(fields: [productId], references: [id], onDelete: Cascade)
+  ingredientId Int        @map("ingredient_id")
+  ingredient   Ingredient @relation(fields: [ingredientId], references: [id])
+  quantity     Float
+
+  @@unique([productId, ingredientId])
+  @@index([productId])
+  @@index([ingredientId])
+  @@map("product_recipe_items")
+}
+
+// ----------------------------------------------------------------------------
+// 6. CLIENTS
+// ----------------------------------------------------------------------------
+model Customer {
+  id        Int      @id @default(autoincrement())
+  name      String
+  phone     String?
+  email     String?
+  notes     String?
+  createdAt DateTime @default(now()) @map("created_at")
+
+  orders Order[]
+  sales  Sale[]
+
+  @@index([phone])
+  @@map("customers")
+}
+
+// ----------------------------------------------------------------------------
+// 7. FOURNISSEURS
+// ----------------------------------------------------------------------------
+model Supplier {
+  id        Int      @id @default(autoincrement())
+  name      String
+  phone     String?
+  email     String?
+  address   String?
+  notes     String?
+  createdAt DateTime @default(now()) @map("created_at")
+
+  expenses Expense[]
+  products Product[]        // fournisseur préféré (voir Product.supplierId)
+  purchases PurchaseRecord[]
+
+  @@map("suppliers")
+}
+
+/**
+ * Historique des achats — absent avant l'audit du module Stock. Chaque réception fournisseur
+ * (mouvement de type `reception`) peut créer une ligne ici, permettant de retrouver le dernier
+ * prix d'achat et l'historique complet par produit/fournisseur (demande explicite § FOURNISSEURS).
+ */
+model PurchaseRecord {
+  id           Int       @id @default(autoincrement())
+  productId    Int?      @map("product_id")
+  product      Product?  @relation(fields: [productId], references: [id])
+  ingredientId Int?      @map("ingredient_id")
+  ingredient   Ingredient? @relation(fields: [ingredientId], references: [id])
+  supplierId   Int       @map("supplier_id")
+  supplier     Supplier  @relation(fields: [supplierId], references: [id])
+  quantity     Float
+  unitCost     Int       @map("unit_cost") // FCFA
+  movementId   Int?      @unique @map("movement_id")
+  movement     StockMovement? @relation(fields: [movementId], references: [id])
+  createdAt    DateTime  @default(now()) @map("created_at")
+
+  @@index([productId])
+  @@index([ingredientId])
+  @@index([supplierId])
+  @@index([createdAt])
+  @@map("purchase_records")
+}
+
+// ----------------------------------------------------------------------------
+// 8. TABLES RESTAURANT (zones, tables, sièges)
+// ----------------------------------------------------------------------------
+model RestaurantZone {
+  id    Int     @id @default(autoincrement())
+  code  String  @unique // dehors | vip_bas | vip_haut
+  label String
+  isVip Boolean @default(false) @map("is_vip")
+
+  tables RestaurantTable[]
+  orders Order[]
+  sales  Sale[]
+
+  @@map("restaurant_zones")
+}
+
+model RestaurantTable {
+  id        Int            @id @default(autoincrement())
+  zoneId    Int            @map("zone_id")
+  zone      RestaurantZone @relation(fields: [zoneId], references: [id])
+  code      String
+  seatCount Int            @default(1) @map("seat_count")
+
+  seats  TableSeat[]
+  orders Order[]
+  sales  Sale[]
+
+  @@unique([zoneId, code])
+  @@index([zoneId])
+  @@map("restaurant_tables")
+}
+
+enum SeatStatus {
+  libre
+  en_cours
+  attente_paiement
+}
+
+model TableSeat {
+  id         Int             @id @default(autoincrement())
+  tableId    Int             @map("table_id")
+  table      RestaurantTable @relation(fields: [tableId], references: [id], onDelete: Cascade)
+  seatNumber Int             @map("seat_number")
+  status     SeatStatus      @default(libre)
+  openedById Int?            @map("opened_by")
+  openedBy   User?           @relation("SeatOpenedBy", fields: [openedById], references: [id])
+
+  orders Order[]
+  sales  Sale[]
+
+  @@unique([tableId, seatNumber])
+  @@index([tableId])
+  @@index([status])
+  @@map("table_seats")
+}
+
+// ----------------------------------------------------------------------------
+// 9/10. COMMANDES
+// ----------------------------------------------------------------------------
+enum OrderType {
+  sur_place
+  emporter
+  livraison
+}
+
+enum OrderStatus {
+  ouverte
+  envoyee
+  servie
+  encaissee
+  annulee
+}
+
+model Order {
+  id         Int             @id @default(autoincrement())
+  tableId    Int?            @map("table_id")
+  table      RestaurantTable? @relation(fields: [tableId], references: [id])
+  seatId     Int?            @map("seat_id")
+  seat       TableSeat?      @relation(fields: [seatId], references: [id])
+  customerId Int?            @map("customer_id")
+  customer   Customer?       @relation(fields: [customerId], references: [id])
+  zoneId     Int?            @map("zone_id")
+  zone       RestaurantZone? @relation(fields: [zoneId], references: [id])
+  orderType  OrderType       @map("order_type")
+  status     OrderStatus     @default(ouverte)
+  openedById Int?            @map("opened_by")
+  openedBy   User?           @relation("OrderOpenedBy", fields: [openedById], references: [id])
+  createdAt  DateTime        @default(now()) @map("created_at")
+  updatedAt  DateTime        @updatedAt @map("updated_at")
+
+  items OrderItem[]
+  sales Sale[]
+
+  @@index([tableId])
+  @@index([status])
+  @@index([createdAt])
+  @@map("orders")
+}
+
+enum PrepZone {
+  cuisine
+  bar
+}
+
+enum PrepStatus {
+  nouveau
+  en_preparation
+  pret
+  servi
+}
+
+model OrderItem {
+  id         Int             @id @default(autoincrement())
+  orderId    Int             @map("order_id")
+  order      Order           @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  productId  Int             @map("product_id")
+  product    Product         @relation(fields: [productId], references: [id])
+  variantId  Int?            @map("variant_id")
+  variant    ProductVariant? @relation(fields: [variantId], references: [id])
+  quantity   Int
+  unitPrice  Int             @map("unit_price")
+  note       String?
+  prepZone   PrepZone?       @map("prep_zone")
+  prepStatus PrepStatus      @default(nouveau) @map("prep_status")
+  createdAt  DateTime        @default(now()) @map("created_at")
+
+  @@index([orderId])
+  @@index([productId])
+  @@index([prepZone, prepStatus])
+  @@map("order_items")
+}
+
+// ----------------------------------------------------------------------------
+// 11/12. VENTES ET PAIEMENTS
+// ----------------------------------------------------------------------------
+enum SaleStatus {
+  validee
+  annulee
+}
+
+model Sale {
+  id               Int             @id @default(autoincrement())
+  ticketNumber     Int             @unique @map("ticket_number")
+  orderId          Int?            @map("order_id")
+  order            Order?          @relation(fields: [orderId], references: [id])
+  cashierId        Int             @map("cashier_id")
+  cashier          User            @relation("SaleCashier", fields: [cashierId], references: [id])
+  serverId         Int?            @map("server_id")
+  server           User?           @relation("SaleServer", fields: [serverId], references: [id])
+  customerId       Int?            @map("customer_id")
+  customer         Customer?       @relation(fields: [customerId], references: [id])
+  zoneId           Int?            @map("zone_id")
+  zone             RestaurantZone? @relation(fields: [zoneId], references: [id])
+  tableId          Int?            @map("table_id")
+  table            RestaurantTable? @relation(fields: [tableId], references: [id])
+  seatId           Int?            @map("seat_id")
+  seat             TableSeat?      @relation(fields: [seatId], references: [id])
+  orderType        OrderType       @map("order_type")
+  subtotal         Int
+  discount         Int             @default(0)
+  total            Int             // total = subtotal - discount, vérifié en service (voir note d'écarts en tête de fichier)
+  status           SaleStatus      @default(validee)
+  cancelledReason  String?         @map("cancelled_reason")
+  createdAt        DateTime        @default(now()) @map("created_at")
+
+  items    SaleItem[]
+  payments Payment[]
+  cashMovements CashMovement[]
+  stockMovements StockMovement[]
+
+  @@index([createdAt])
+  @@index([cashierId])
+  @@index([status])
+  @@index([zoneId])
+  @@map("sales")
+}
+
+model SaleItem {
+  id        Int             @id @default(autoincrement())
+  saleId    Int             @map("sale_id")
+  sale      Sale            @relation(fields: [saleId], references: [id], onDelete: Cascade)
+  productId Int             @map("product_id")
+  product   Product         @relation(fields: [productId], references: [id])
+  variantId Int?            @map("variant_id")
+  variant   ProductVariant? @relation("SaleItemVariant", fields: [variantId], references: [id])
+  name      String          // copie figée du nom au moment de la vente
+  quantity  Int
+  unitPrice Int             @map("unit_price")
+  note      String?
+
+  @@index([saleId])
+  @@index([productId])
+  @@map("sale_items")
+}
+
+enum PaymentMethod {
+  especes
+  wave
+  orange_money
+  mtn_money
+  carte
+}
+
+model Payment {
+  id           Int           @id @default(autoincrement())
+  saleId       Int           @map("sale_id")
+  sale         Sale          @relation(fields: [saleId], references: [id], onDelete: Cascade)
+  method       PaymentMethod
+  amount       Int
+  cashReceived Int?          @map("cash_received")
+  changeGiven  Int?          @map("change_given")
+  createdAt    DateTime      @default(now()) @map("created_at")
+
+  @@index([saleId])
+  @@map("payments")
+}
+
+// ----------------------------------------------------------------------------
+// 13. MOUVEMENTS DE CAISSE
+// ----------------------------------------------------------------------------
+enum CashMovementType {
+  ouverture
+  fermeture
+  depot
+  retrait
+  vente
+  remboursement
+}
+
+model CashMovement {
+  id            Int              @id @default(autoincrement())
+  type          CashMovementType
+  amount        Int              // peut être négatif (retrait, remboursement)
+  balanceAfter  Int?             @map("balance_after")
+  userId        Int?             @map("user_id")
+  user          User?            @relation(fields: [userId], references: [id])
+  saleId        Int?             @map("sale_id")
+  sale          Sale?            @relation(fields: [saleId], references: [id])
+  note          String?
+  createdAt     DateTime         @default(now()) @map("created_at")
+
+  @@index([createdAt])
+  @@index([type])
+  @@map("cash_movements")
+}
+
+// ----------------------------------------------------------------------------
+// 14. DÉPENSES
+// ----------------------------------------------------------------------------
+model Expense {
+  id          Int       @id @default(autoincrement())
+  supplierId  Int?      @map("supplier_id")
+  supplier    Supplier? @relation(fields: [supplierId], references: [id])
+  category    String?
+  amount      Int
+  description String?
+  userId      Int?      @map("user_id")
+  user        User?     @relation(fields: [userId], references: [id])
+  createdAt   DateTime  @default(now()) @map("created_at")
+
+  @@index([createdAt])
+  @@index([supplierId])
+  @@map("expenses")
+}
+
+// ----------------------------------------------------------------------------
+// 15. STOCK
+// ----------------------------------------------------------------------------
+model Stock {
+  id           Int         @id @default(autoincrement())
+  productId    Int?        @unique @map("product_id")
+  product      Product?    @relation(fields: [productId], references: [id], onDelete: Cascade)
+  ingredientId Int?        @unique @map("ingredient_id")
+  ingredient   Ingredient? @relation(fields: [ingredientId], references: [id], onDelete: Cascade)
+  quantity     Float       @default(0)
+  threshold    Float       @default(0)
+  updatedAt    DateTime    @updatedAt @map("updated_at")
+  // Contrainte "exactement un de productId/ingredientId non nul" appliquée en service —
+  // voir note d'écarts en tête de fichier.
+
+  @@map("stock")
+}
+
+enum StockMovementKind {
+  vente
+  ajustement
+  reception            // entrée fournisseur
+  inventaire
+  consommation_cuisine
+  consommation_bar
+  casse
+  perte
+  vol
+  retour_fournisseur
+  retour_client
+}
+
+model StockMovement {
+  id            Int               @id @default(autoincrement())
+  sourceId      String?           @unique @map("source_id") // identifiant stable côté Electron — rapprochement idempotent, même principe que Product.sourceId
+  productId     Int?              @map("product_id")
+  product       Product?          @relation(fields: [productId], references: [id])
+  ingredientId  Int?              @map("ingredient_id")
+  ingredient    Ingredient?       @relation(fields: [ingredientId], references: [id])
+  kind          StockMovementKind
+  delta         Float?
+  quantityAfter Float             @map("quantity_after")
+  reason        String?           // motif/justification — OBLIGATOIRE en pratique pour casse/perte/vol/ajustement (appliqué en service, voir note d'écarts en tête de fichier)
+  reference     String?           // référence libre (n° de vente, d'achat, d'inventaire...) — généralise saleId ci-dessous à toute origine, pas seulement les ventes
+  device        String?           // poste d'origine (ex. nom de la caisse Electron), utile pour repérer un mouvement suspect
+  saleId        Int?              @map("sale_id")
+  sale          Sale?             @relation(fields: [saleId], references: [id])
+  userId        Int?              @map("user_id")
+  user          User?             @relation(fields: [userId], references: [id])
+  createdAt     DateTime          @default(now()) @map("created_at")
+  purchaseRecord PurchaseRecord?
+  // AUCUNE colonne updatedAt : un mouvement est immuable une fois créé (append-only), voir § journal
+  // dans la documentation technique — aucune route de modification ou de suppression n'est exposée.
+
+  @@index([productId])
+  @@index([ingredientId])
+  @@index([createdAt])
+  @@index([kind])
+  @@map("stock_movements")
+}
+
+// ----------------------------------------------------------------------------
+// 16. INVENTAIRES
+// ----------------------------------------------------------------------------
+enum InventoryStatus {
+  en_cours
+  cloture
+}
+
+model Inventory {
+  id          Int             @id @default(autoincrement())
+  label       String?
+  status      InventoryStatus @default(en_cours)
+  startedById Int?            @map("started_by")
+  startedBy   User?           @relation(fields: [startedById], references: [id])
+  startedAt   DateTime        @default(now()) @map("started_at")
+  closedAt    DateTime?       @map("closed_at")
+
+  items InventoryItem[]
+
+  @@map("inventories")
+}
+
+model InventoryItem {
+  id           Int         @id @default(autoincrement())
+  inventoryId  Int         @map("inventory_id")
+  inventory    Inventory   @relation(fields: [inventoryId], references: [id], onDelete: Cascade)
+  productId    Int?        @map("product_id")
+  product      Product?    @relation(fields: [productId], references: [id])
+  ingredientId Int?        @map("ingredient_id")
+  ingredient   Ingredient? @relation(fields: [ingredientId], references: [id])
+  expectedQty  Float       @map("expected_qty")
+  countedQty   Float?      @map("counted_qty")
+  // "variance" (counted - expected) recalculée à la lecture côté application plutôt que
+  // stockée — voir note d'écarts en tête de fichier.
+
+  @@index([inventoryId])
+  @@map("inventory_items")
+}
+
+// ----------------------------------------------------------------------------
+// 17. HISTORIQUE DES CHANGEMENTS DE VALEUR
+// ----------------------------------------------------------------------------
+model ChangeHistory {
+  id         Int      @id @default(autoincrement())
+  entityType String   @map("entity_type")
+  entityId   Int?     @map("entity_id")
+  field      String
+  oldValue   String?  @map("old_value")
+  newValue   String?  @map("new_value")
+  userId     Int?     @map("user_id")
+  user       User?    @relation(fields: [userId], references: [id])
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  @@index([entityType, entityId])
+  @@index([createdAt])
+  @@map("change_history")
+}
+
+// ----------------------------------------------------------------------------
+// 18. JOURNAL D'AUDIT (sécurité : connexions, permissions, ventes...)
+// ----------------------------------------------------------------------------
+model AuditLog {
+  id        Int      @id @default(autoincrement())
+  action    String
+  message   String
+  userId    Int?     @map("user_id")
+  user      User?    @relation(fields: [userId], references: [id])
+  roleCode  String?  @map("role_code")
+  device    String?
+  ipAddress String?  @map("ip_address")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([createdAt])
+  @@index([userId])
+  @@index([action])
+  @@map("audit_log")
+}
+
+// ----------------------------------------------------------------------------
+// Paramètres applicatifs (clé/valeur)
+// ----------------------------------------------------------------------------
+model AppSetting {
+  key       String   @id
+  value     Json
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@map("app_settings")
+}
+
+// ----------------------------------------------------------------------------
+// Journal des conflits de synchronisation (protocole push/pull existant avec
+// l'application de bureau Electron, non modifiée dans cette passe — voir
+// src/sync-routes.ts pour le détail complet du protocole conservé).
+// ----------------------------------------------------------------------------
+model SyncConflict {
+  id            Int      @id @default(autoincrement())
+  tableName     String   @map("table_name")
+  recordUuid    String   @map("record_uuid")
+  localVersion  String   @map("local_version")
+  serverVersion String   @map("server_version")
+  detectedAt    DateTime @default(now()) @map("detected_at")
+
+  @@map("sync_conflicts")
+}

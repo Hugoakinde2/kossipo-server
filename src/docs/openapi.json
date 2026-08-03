@@ -1,0 +1,64 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "KOSSIPO — API centrale",
+    "version": "1.0.0",
+    "description": "API REST du serveur central KOSSIPO (utilisateurs, catalogue, tables, commandes, ventes, stock, statistiques, sauvegardes). Toutes les routes sauf /auth/login nécessitent un jeton JWT (en-tête Authorization: Bearer <jeton>)."
+  },
+  "servers": [{ "url": "/api/v1" }],
+  "components": {
+    "securitySchemes": {
+      "bearerAuth": { "type": "http", "scheme": "bearer", "bearerFormat": "JWT" }
+    }
+  },
+  "security": [{ "bearerAuth": [] }],
+  "paths": {
+    "/auth/login": {
+      "post": {
+        "summary": "Connexion (nom + PIN), émet un jeton JWT",
+        "security": [],
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "properties": { "name": { "type": "string" }, "pin": { "type": "string" } }, "required": ["name", "pin"] } } } },
+        "responses": { "200": { "description": "Connexion réussie" }, "401": { "description": "Identifiants incorrects" } }
+      }
+    },
+    "/auth/me": { "get": { "summary": "Identité associée au jeton courant", "responses": { "200": { "description": "OK" } } } },
+    "/users": {
+      "get": { "summary": "Liste des utilisateurs", "responses": { "200": { "description": "OK" } } },
+      "post": { "summary": "Créer un utilisateur (admin)", "responses": { "201": { "description": "Créé" } } }
+    },
+    "/users/{id}/active": { "patch": { "summary": "Activer/désactiver un utilisateur", "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "integer" } }], "responses": { "200": { "description": "OK" } } } },
+    "/users/{id}": { "delete": { "summary": "Supprimer (logiquement) un utilisateur", "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "integer" } }], "responses": { "200": { "description": "OK" } } } },
+    "/catalog/categories": { "get": { "summary": "Liste des catégories", "responses": { "200": { "description": "OK" } } } },
+    "/catalog/products": {
+      "get": { "summary": "Liste des produits (filtrable par categoryId)", "responses": { "200": { "description": "OK" } } },
+      "post": { "summary": "Créer un produit (admin/gérant)", "responses": { "201": { "description": "Créé" } } }
+    },
+    "/catalog/products/{id}": {
+      "patch": { "summary": "Modifier un produit", "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "integer" } }], "responses": { "200": { "description": "OK" } } },
+      "delete": { "summary": "Désactiver un produit", "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "integer" } }], "responses": { "200": { "description": "OK" } } }
+    },
+    "/tables/zones": { "get": { "summary": "Liste des zones (Dehors/VIP Bas/VIP Haut)", "responses": { "200": { "description": "OK" } } } },
+    "/tables": { "get": { "summary": "Plan de salle complet (tables + sièges)", "responses": { "200": { "description": "OK" } } } },
+    "/tables/seats/{id}/status": { "patch": { "summary": "Changer le statut d'un siège", "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "integer" } }], "responses": { "200": { "description": "OK" } } } },
+    "/orders": {
+      "get": { "summary": "Commandes actives (cuisine/bar)", "responses": { "200": { "description": "OK" } } },
+      "post": { "summary": "Créer une commande", "responses": { "201": { "description": "Créée" } } }
+    },
+    "/orders/items/{itemId}/status": { "patch": { "summary": "Changer le statut d'une ligne (Nouveau/En préparation/Prêt/Servi)", "parameters": [{ "name": "itemId", "in": "path", "required": true, "schema": { "type": "integer" } }], "responses": { "200": { "description": "OK" } } } },
+    "/orders/{id}/close": { "post": { "summary": "Clôturer une commande (encaissée)", "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "integer" } }], "responses": { "200": { "description": "OK" } } } },
+    "/sales": {
+      "get": { "summary": "Historique des ventes", "responses": { "200": { "description": "OK" } } },
+      "post": { "summary": "Encaisser une vente (déduit le stock automatiquement)", "responses": { "201": { "description": "Créée" } } }
+    },
+    "/sales/{id}/cancel": { "post": { "summary": "Rembourser une vente (restitue le stock, motif obligatoire)", "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "integer" } }], "responses": { "200": { "description": "OK" } } } },
+    "/stock": { "get": { "summary": "Niveaux de stock actuels", "responses": { "200": { "description": "OK" } } } },
+    "/stock/low": { "get": { "summary": "Articles/ingrédients sous leur seuil", "responses": { "200": { "description": "OK" } } } },
+    "/stock/movements": { "get": { "summary": "Historique des mouvements de stock", "responses": { "200": { "description": "OK" } } } },
+    "/stock/{id}": { "patch": { "summary": "Ajuster manuellement une quantité (admin/gérant)", "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "integer" } }], "responses": { "200": { "description": "OK" } } } },
+    "/stats/today": { "get": { "summary": "Statistiques du jour (CA, ventes par heure/serveur/caissier, top produits)", "responses": { "200": { "description": "OK" } } } },
+    "/backups": {
+      "get": { "summary": "Liste des sauvegardes de la base centrale (admin)", "responses": { "200": { "description": "OK" } } },
+      "post": { "summary": "Déclencher une sauvegarde immédiate (admin)", "responses": { "201": { "description": "Créée" } } }
+    }
+  }
+}
